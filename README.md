@@ -1,4 +1,4 @@
-# MCP PostgreSQL — UPCH
+# MCP PostgreSQL
 
 Servidor MCP (Model Context Protocol) que expone herramientas de introspección y consulta de solo lectura sobre bases de datos PostgreSQL para Claude Code.
 
