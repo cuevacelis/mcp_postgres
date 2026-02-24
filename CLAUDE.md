@@ -11,34 +11,53 @@ pnpm start          # Run the compiled server (node dist/index.js)
 npx tsx test-connection.ts  # Test PostgreSQL connectivity
 ```
 
-Always run `pnpm run build` after editing `src/index.ts` before testing changes.
+Always run `pnpm run build` after editing any file in `src/` before testing changes.
 
 ## Architecture
 
 This is a **Model Context Protocol (MCP) server** that exposes PostgreSQL database introspection and read-only querying capabilities to Claude Code via stdio transport.
 
-**Single source file:** `src/index.ts` contains the entire server implementation (~700 lines):
-- PostgreSQL pool initialization from `.env` variables
-- 8 MCP tool definitions (JSON Schema)
-- Tool handler implementations dispatched via `handleToolCall()`
-- MCP `Server` setup with `StdioServerTransport`
-- `main()` entry point that verifies DB connectivity before starting
+**Module structure:**
+
+```
+src/
+├── index.ts              # Bootstrap/entry point — connects transport, verifies DB
+├── server.ts             # createServer() — instancia McpServer, llama register* de cada dominio
+├── db/
+│   └── pool.ts           # Pool, allowedSchemas, defaultLimit, isSchemaAllowed
+├── tools/
+│   ├── introspection.ts  # registerIntrospectionTools() — postgres_list_schemas/tables, postgres_describe_table
+│   ├── objects.ts        # registerObjectTools() — postgres_list_functions/triggers, postgres_get_*_definition
+│   └── query.ts          # registerQueryTools() — postgres_query_table, postgres_execute_query
+└── utils/
+    └── response.ts       # formatResult() (con CHARACTER_LIMIT=25000), assertSchemaAllowed()
+```
+
+**Import graph (no cycles):**
+```
+index.ts → db/pool.ts, server.ts
+server.ts → tools/introspection.ts, tools/objects.ts, tools/query.ts
+tools/* → utils/response.ts
+test-connection.ts → db/pool.ts
+```
 
 **Runtime flow:** Claude Code spawns this process → communicates over stdio → server queries PostgreSQL → returns JSON results.
 
 ### MCP Tools
 
+All tools carry `readOnlyHint: true`, `destructiveHint: false`. List tools support `limit`/`offset` pagination and return `has_more`/`next_offset`.
+
 | Tool | Purpose |
 |------|---------|
-| `list_schemas` | All accessible schemas |
-| `list_tables` | Tables in a schema with column counts |
-| `describe_table` | Full column/constraint/index details |
-| `list_functions` | Stored procedures with signatures |
-| `list_triggers` | Triggers with event/timing |
-| `query_table` | Simple single-table SELECT with WHERE/LIMIT |
-| `execute_query` | Advanced queries (JOINs, CTEs, aggregations) |
-| `get_function_definition` | Stored procedure source code |
-| `get_trigger_definition` | Trigger definition |
+| `postgres_list_schemas` | All accessible schemas |
+| `postgres_list_tables` | Tables in a schema — paginado, with column counts |
+| `postgres_describe_table` | Full column/constraint/index details (3 queries en paralelo) |
+| `postgres_list_functions` | Stored procedures with signatures — paginado |
+| `postgres_list_triggers` | Triggers with event/timing — paginado |
+| `postgres_query_table` | Simple single-table SELECT with WHERE/LIMIT |
+| `postgres_execute_query` | Advanced queries (JOINs, CTEs, aggregations) |
+| `postgres_get_function_definition` | Stored procedure source code |
+| `postgres_get_trigger_definition` | Trigger definition |
 
 ### Security Model
 
@@ -67,7 +86,8 @@ Multiple pre-configured `.env-*` files exist for different environments (e.g., `
 ## Tech Stack
 
 - **TypeScript** (ESM, `module: Node16`, `target: ES2022`, strict mode)
-- **`@modelcontextprotocol/sdk`** — MCP Server and StdioServerTransport
+- **`@modelcontextprotocol/sdk` v1.24+** — `McpServer` + `registerTool` (API moderna)
+- **`zod`** — Runtime validation de inputs en cada herramienta
 - **`pg`** — PostgreSQL driver (Pool)
 - **`dotenv`** — Environment variable loading
 - **pnpm** — Package manager (use pnpm, not npm or yarn)
