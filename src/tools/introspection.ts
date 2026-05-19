@@ -64,7 +64,7 @@ export function registerIntrospectionTools(
          WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
         [schema]
       );
-      const total = parseInt(countResult.rows[0].total);
+      const total = Number.parseInt(countResult.rows[0].total, 10);
 
       const result = await pool.query(
         `
@@ -74,9 +74,10 @@ export function registerIntrospectionTools(
           (SELECT COUNT(*) FROM information_schema.columns c
            WHERE c.table_schema = t.table_schema AND c.table_name = t.table_name) as column_count
         FROM information_schema.tables t
-        LEFT JOIN pg_catalog.pg_class pgc ON pgc.relname = t.table_name
-        LEFT JOIN pg_catalog.pg_namespace pgn
-          ON pgn.oid = pgc.relnamespace AND pgn.nspname = t.table_schema
+        LEFT JOIN pg_catalog.pg_namespace pgn ON pgn.nspname = t.table_schema
+        LEFT JOIN pg_catalog.pg_class pgc
+          ON pgc.relname = t.table_name
+          AND pgc.relnamespace = pgn.oid
         WHERE t.table_schema = $1 AND t.table_type = 'BASE TABLE'
         ORDER BY t.table_name
         LIMIT $2 OFFSET $3
@@ -122,9 +123,10 @@ export function registerIntrospectionTools(
             c.column_default,
             pg_catalog.col_description(pgc.oid, c.ordinal_position) as column_description
           FROM information_schema.columns c
-          LEFT JOIN pg_catalog.pg_class pgc ON pgc.relname = c.table_name
-          LEFT JOIN pg_catalog.pg_namespace pgn
-            ON pgn.oid = pgc.relnamespace AND pgn.nspname = c.table_schema
+          LEFT JOIN pg_catalog.pg_namespace pgn ON pgn.nspname = c.table_schema
+          LEFT JOIN pg_catalog.pg_class pgc
+            ON pgc.relname = c.table_name
+            AND pgc.relnamespace = pgn.oid
           WHERE c.table_schema = $1 AND c.table_name = $2
           ORDER BY c.ordinal_position
           `,

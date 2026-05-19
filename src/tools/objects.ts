@@ -37,7 +37,7 @@ export function registerObjectTools(
          WHERE n.nspname = $1`,
         [schema]
       );
-      const total = parseInt(countResult.rows[0].total);
+      const total = Number.parseInt(countResult.rows[0].total, 10);
 
       const result = await pool.query(
         `
@@ -80,25 +80,33 @@ export function registerObjectTools(
     'postgres_get_function_definition',
     {
       title: 'Get Function Source Code',
-      description: 'Obtiene la definición completa (código fuente) de una función o procedimiento almacenado.',
+      description: 'Obtiene la definición completa (código fuente) de una función o procedimiento almacenado. Si hay sobrecarga, usa function_signature para desambiguar.',
       inputSchema: {
         schema: z.string().min(1).describe('Nombre del esquema'),
         function_name: z.string().min(1).describe('Nombre de la función'),
+        function_signature: z
+          .string()
+          .optional()
+          .describe('Firma exacta de argumentos para desambiguar sobrecargas (ej: "integer, text")'),
       },
       annotations: TOOL_ANNOTATIONS,
     },
-    async ({ schema, function_name }) => {
+    async ({ schema, function_name, function_signature }) => {
       assertSchemaAllowed(schema, allowedSchemas);
 
       const result = await pool.query(
         `
         SELECT
+          p.oid,
           p.proname as function_name,
+          pg_catalog.pg_get_function_identity_arguments(p.oid) as function_signature,
+          pg_catalog.pg_get_function_result(p.oid) as return_type,
           pg_catalog.pg_get_functiondef(p.oid) as definition,
           pg_catalog.obj_description(p.oid, 'pg_proc') as description
         FROM pg_catalog.pg_proc p
         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = $1 AND p.proname = $2
+        ORDER BY pg_catalog.pg_get_function_identity_arguments(p.oid)
         `,
         [schema, function_name]
       );
@@ -107,7 +115,37 @@ export function registerObjectTools(
         throw new Error(`Function '${function_name}' not found in schema '${schema}'`);
       }
 
-      return formatResult(result.rows[0]);
+      let selected = result.rows[0];
+      if (function_signature) {
+        const normalizedSignature = function_signature.trim();
+        const matched = result.rows.find(
+          (row) => (row.function_signature as string).trim() === normalizedSignature
+        );
+        if (!matched) {
+          const availableSignatures = result.rows.map(
+            (row) => row.function_signature as string
+          );
+          throw new Error(
+            `No existe la sobrecarga '${function_name}(${normalizedSignature})' en el schema '${schema}'. Firmas disponibles: ${availableSignatures.join(' | ')}`
+          );
+        }
+        selected = matched;
+      } else if (result.rows.length > 1) {
+        const availableSignatures = result.rows.map(
+          (row) => row.function_signature as string
+        );
+        throw new Error(
+          `La función '${function_name}' está sobrecargada en el schema '${schema}'. Especifica function_signature. Firmas disponibles: ${availableSignatures.join(' | ')}`
+        );
+      }
+
+      return formatResult({
+        function_name: selected.function_name,
+        function_signature: selected.function_signature,
+        return_type: selected.return_type,
+        definition: selected.definition,
+        description: selected.description,
+      });
     }
   );
 
@@ -127,27 +165,37 @@ export function registerObjectTools(
       assertSchemaAllowed(schema, allowedSchemas);
 
       const countResult = await pool.query<{ total: string }>(
-        `SELECT COUNT(*) as total FROM information_schema.triggers
-         WHERE trigger_schema = $1`,
+        `SELECT COUNT(*) as total
+         FROM pg_catalog.pg_trigger tg
+         JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND NOT tg.tgisinternal`,
         [schema]
       );
-      const total = parseInt(countResult.rows[0].total);
+      const total = Number.parseInt(countResult.rows[0].total, 10);
 
       const result = await pool.query(
         `
         SELECT
-          t.trigger_name,
-          t.event_manipulation as event,
-          t.event_object_table as table_name,
-          t.action_timing as timing,
-          t.action_statement as action,
-          pg_catalog.obj_description(
-            (SELECT oid FROM pg_trigger WHERE tgname = t.trigger_name LIMIT 1),
-            'pg_trigger'
-          ) as description
-        FROM information_schema.triggers t
-        WHERE t.trigger_schema = $1
-        ORDER BY t.event_object_table, t.trigger_name
+          tg.tgname as trigger_name,
+          c.relname as table_name,
+          COALESCE(
+            string_agg(DISTINCT t.event_manipulation, ' OR ' ORDER BY t.event_manipulation),
+            'UNKNOWN'
+          ) as event,
+          COALESCE(MAX(t.action_timing), 'UNKNOWN') as timing,
+          COALESCE(MAX(t.action_statement), pg_catalog.pg_get_triggerdef(tg.oid)) as action,
+          pg_catalog.obj_description(tg.oid, 'pg_trigger') as description
+        FROM pg_catalog.pg_trigger tg
+        JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN information_schema.triggers t
+          ON t.trigger_name = tg.tgname
+          AND t.event_object_table = c.relname
+          AND t.event_object_schema = n.nspname
+        WHERE n.nspname = $1 AND NOT tg.tgisinternal
+        GROUP BY tg.oid, tg.tgname, c.relname
+        ORDER BY c.relname, tg.tgname
         LIMIT $2 OFFSET $3
         `,
         [schema, limit, offset]
@@ -174,31 +222,64 @@ export function registerObjectTools(
       inputSchema: {
         schema: z.string().min(1).describe('Nombre del esquema'),
         trigger_name: z.string().min(1).describe('Nombre del trigger'),
+        table_name: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Nombre de la tabla si el trigger existe con el mismo nombre en múltiples tablas'),
       },
       annotations: TOOL_ANNOTATIONS,
     },
-    async ({ schema, trigger_name }) => {
+    async ({ schema, trigger_name, table_name }) => {
       assertSchemaAllowed(schema, allowedSchemas);
+
+      const params: string[] = [schema, trigger_name];
+      let tableFilter = '';
+      if (table_name) {
+        params.push(table_name);
+        tableFilter = ` AND c.relname = $${params.length}`;
+      }
 
       const result = await pool.query(
         `
         SELECT
-          t.trigger_name,
-          t.event_manipulation as event,
-          t.event_object_table as table_name,
-          t.action_timing as timing,
-          t.action_statement as action,
-          pg_get_triggerdef(
-            (SELECT oid FROM pg_trigger WHERE tgname = t.trigger_name LIMIT 1)
-          ) as trigger_definition
-        FROM information_schema.triggers t
-        WHERE t.trigger_schema = $1 AND t.trigger_name = $2
+          tg.tgname as trigger_name,
+          c.relname as table_name,
+          COALESCE(
+            string_agg(DISTINCT t.event_manipulation, ' OR ' ORDER BY t.event_manipulation),
+            'UNKNOWN'
+          ) as event,
+          COALESCE(MAX(t.action_timing), 'UNKNOWN') as timing,
+          COALESCE(MAX(t.action_statement), pg_catalog.pg_get_triggerdef(tg.oid)) as action,
+          pg_catalog.pg_get_triggerdef(tg.oid) as trigger_definition
+        FROM pg_catalog.pg_trigger tg
+        JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN information_schema.triggers t
+          ON t.trigger_name = tg.tgname
+          AND t.event_object_table = c.relname
+          AND t.event_object_schema = n.nspname
+        WHERE n.nspname = $1
+          AND tg.tgname = $2
+          AND NOT tg.tgisinternal
+          ${tableFilter}
+        GROUP BY tg.oid, tg.tgname, c.relname
+        ORDER BY c.relname
         `,
-        [schema, trigger_name]
+        params
       );
 
       if (result.rows.length === 0) {
-        throw new Error(`Trigger '${trigger_name}' not found in schema '${schema}'`);
+        throw new Error(
+          `Trigger '${trigger_name}' not found in schema '${schema}'${table_name ? ` for table '${table_name}'` : ''}`
+        );
+      }
+
+      if (!table_name && result.rows.length > 1) {
+        const candidateTables = result.rows.map((row) => row.table_name as string);
+        throw new Error(
+          `El trigger '${trigger_name}' existe en múltiples tablas del schema '${schema}'. Especifica table_name. Tablas: ${candidateTables.join(', ')}`
+        );
       }
 
       return formatResult(result.rows[0]);
