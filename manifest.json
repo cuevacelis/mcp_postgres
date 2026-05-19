@@ -106,12 +106,6 @@
     { "name": "postgres_explain_query", "description": "EXPLAIN or EXPLAIN ANALYZE for a SELECT/WITH." },
     { "name": "postgres_get_table_stats", "description": "Storage footprint and activity stats for a table." }
   ],
-  "prompts": [
-    { "name": "audit-table" },
-    { "name": "find-tables" },
-    { "name": "explain-foreign-keys" },
-    { "name": "profile-slow-query" }
-  ],
   "keywords": ["mcp", "postgres", "postgresql", "database", "introspection", "read-only"],
   "compatibility": {
     "platforms": ["darwin", "linux", "win32"],
