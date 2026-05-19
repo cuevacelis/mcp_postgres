@@ -1,15 +1,17 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Pool } from 'pg';
-import { assertSchemaAllowed, formatResult } from '../utils/response.js';
+import {
+  assertSchemaAllowed,
+  formatResult,
+  toolError,
+  unwrapError,
+} from '../utils/response.js';
 
 const SQL_IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const sqlIdentifierSchema = z
   .string()
-  .regex(
-    SQL_IDENTIFIER_REGEX,
-    'Solo se permiten identificadores SQL simples (letras, números y guion bajo).'
-  );
+  .regex(SQL_IDENTIFIER_REGEX, 'Only simple SQL identifiers are allowed (letters, digits, underscore).');
 
 const scalarFilterValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 const filterOperatorSchema = z.enum([
@@ -29,8 +31,8 @@ const filterOperatorSchema = z.enum([
 
 const tableFilterSchema = z
   .object({
-    column: sqlIdentifierSchema.describe('Nombre de columna para filtrar'),
-    operator: filterOperatorSchema.default('=').describe('Operador de comparación'),
+    column: sqlIdentifierSchema.describe('Column to filter on.'),
+    operator: filterOperatorSchema.default('=').describe('Comparison operator.'),
     value: z.union([scalarFilterValueSchema, z.array(scalarFilterValueSchema)]).optional(),
   })
   .superRefine((filter, ctx) => {
@@ -38,7 +40,7 @@ const tableFilterSchema = z
       if (filter.value !== undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `El operador ${filter.operator} no acepta el campo 'value'.`,
+          message: `Operator ${filter.operator} does not accept a 'value' field.`,
           path: ['value'],
         });
       }
@@ -48,7 +50,7 @@ const tableFilterSchema = z
     if (filter.value === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `El operador ${filter.operator} requiere el campo 'value'.`,
+        message: `Operator ${filter.operator} requires a 'value' field.`,
         path: ['value'],
       });
       return;
@@ -57,7 +59,7 @@ const tableFilterSchema = z
     if ((filter.operator === 'IN' || filter.operator === 'NOT IN') && !Array.isArray(filter.value)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `El operador ${filter.operator} requiere un arreglo en 'value'.`,
+        message: `Operator ${filter.operator} requires an array in 'value'.`,
         path: ['value'],
       });
       return;
@@ -66,15 +68,15 @@ const tableFilterSchema = z
     if ((filter.operator === 'IN' || filter.operator === 'NOT IN') && Array.isArray(filter.value) && filter.value.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `El operador ${filter.operator} requiere al menos un valor.`,
+        message: `Operator ${filter.operator} requires at least one value.`,
         path: ['value'],
       });
     }
   });
 
 const orderBySchema = z.object({
-  column: sqlIdentifierSchema.describe('Nombre de columna para ordenar'),
-  direction: z.enum(['ASC', 'DESC']).default('ASC').describe('Dirección del orden'),
+  column: sqlIdentifierSchema.describe('Column to order by.'),
+  direction: z.enum(['ASC', 'DESC']).default('ASC').describe('Sort direction.'),
 });
 
 type QueryParam = string | number | boolean | null;
@@ -86,6 +88,22 @@ const TOOL_ANNOTATIONS = {
   idempotentHint: true,
   openWorldHint: false,
 } as const;
+
+const queryTableOutput = {
+  schema: z.string(),
+  table: z.string(),
+  query: z.string(),
+  rows: z.array(z.record(z.unknown())),
+  row_count: z.number().int(),
+  limit: z.number().int(),
+};
+
+const executeQueryOutput = {
+  query: z.string(),
+  rows: z.array(z.record(z.unknown())),
+  row_count: z.number().int(),
+  fields: z.array(z.string()),
+};
 
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
@@ -100,7 +118,7 @@ function buildFilterCondition(filter: TableFilter, params: QueryParam[]): string
 
   if (filter.operator === 'IN' || filter.operator === 'NOT IN') {
     if (!Array.isArray(filter.value) || filter.value.length === 0) {
-      throw new Error(`El operador ${filter.operator} requiere una lista de valores no vacía.`);
+      throw new Error(`Operator ${filter.operator} requires a non-empty array of values.`);
     }
     const placeholders = filter.value.map((value) => {
       params.push(value);
@@ -110,7 +128,7 @@ function buildFilterCondition(filter: TableFilter, params: QueryParam[]): string
   }
 
   if (Array.isArray(filter.value)) {
-    throw new Error(`El operador ${filter.operator} no acepta una lista en 'value'.`);
+    throw new Error(`Operator ${filter.operator} does not accept an array in 'value'.`);
   }
 
   if (filter.value === null) {
@@ -120,11 +138,11 @@ function buildFilterCondition(filter: TableFilter, params: QueryParam[]): string
     if (filter.operator === '!=') {
       return `${column} IS NOT NULL`;
     }
-    throw new Error(`El operador ${filter.operator} no es válido con value null.`);
+    throw new Error(`Operator ${filter.operator} is not valid with null value.`);
   }
 
   if (filter.value === undefined) {
-    throw new Error(`El operador ${filter.operator} requiere el campo 'value'.`);
+    throw new Error(`Operator ${filter.operator} requires a 'value' field.`);
   }
 
   params.push(filter.value);
@@ -141,64 +159,69 @@ export function registerQueryTools(
     'postgres_query_table',
     {
       title: 'Query Single Table',
-      description: `Ejecuta una consulta SELECT segura en una sola tabla con filtros estructurados y LIMIT automático. Para JOINs, subqueries, CTEs o consultas multi-tabla, usa postgres_execute_query. Límite máximo: 100 filas.`,
+      description: 'Runs a safe SELECT on a single table using structured filters (parameterized) and an automatic LIMIT. Use this as the default read tool. For JOINs, subqueries, CTEs, or aggregations escalate to postgres_execute_query. Max 100 rows.',
       inputSchema: {
-        schema: sqlIdentifierSchema.describe('Nombre del esquema'),
-        table: sqlIdentifierSchema.describe('Nombre de la tabla'),
+        schema: sqlIdentifierSchema.describe('Schema name.'),
+        table: sqlIdentifierSchema.describe('Table name.'),
         columns: z
           .array(sqlIdentifierSchema)
           .default([])
-          .describe('Columnas a seleccionar. Vacío = todas las columnas (*)'),
+          .describe('Columns to project. Empty = all columns (*).'),
         filters: z
           .array(tableFilterSchema)
           .max(20)
           .default([])
-          .describe('Filtros estructurados combinados con AND'),
+          .describe('Structured filters combined with AND. Values are always parameterized.'),
         order_by: z
           .array(orderBySchema)
           .max(5)
           .optional()
-          .describe('Ordenamiento opcional'),
+          .describe('Optional ORDER BY clauses.'),
         limit: z.number().int().min(1).max(100).default(defaultLimit)
-          .describe(`Número máximo de registros a retornar (default: ${defaultLimit}, max: 100)`),
+          .describe(`Maximum rows to return (default: ${defaultLimit}, max: 100).`),
       },
+      outputSchema: queryTableOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, table, columns, filters, order_by, limit }) => {
-      assertSchemaAllowed(schema, allowedSchemas);
+      try {
+        assertSchemaAllowed(schema, allowedSchemas);
 
-      const safeLimit = Math.min(Math.max(1, limit), 100);
-      const selectedColumns = columns.length > 0
-        ? columns.map((column) => quoteIdentifier(column)).join(', ')
-        : '*';
-      let query = `SELECT ${selectedColumns} FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+        const safeLimit = Math.min(Math.max(1, limit), 100);
+        const selectedColumns = columns.length > 0
+          ? columns.map((column) => quoteIdentifier(column)).join(', ')
+          : '*';
+        let query = `SELECT ${selectedColumns} FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
 
-      const params: QueryParam[] = [];
-      if (filters.length > 0) {
-        const whereClauses = filters.map((filter) => buildFilterCondition(filter, params));
-        query += ` WHERE ${whereClauses.join(' AND ')}`;
+        const params: QueryParam[] = [];
+        if (filters.length > 0) {
+          const whereClauses = filters.map((filter) => buildFilterCondition(filter, params));
+          query += ` WHERE ${whereClauses.join(' AND ')}`;
+        }
+
+        if (order_by && order_by.length > 0) {
+          const orderByClause = order_by
+            .map(({ column, direction }) => `${quoteIdentifier(column)} ${direction}`)
+            .join(', ');
+          query += ` ORDER BY ${orderByClause}`;
+        }
+
+        query += ` LIMIT $${params.length + 1}`;
+        params.push(safeLimit);
+
+        const result = await pool.query(query, params);
+
+        return formatResult({
+          schema,
+          table,
+          query,
+          rows: result.rows,
+          row_count: result.rows.length,
+          limit: safeLimit,
+        });
+      } catch (error) {
+        return toolError(`Query on '${schema}.${table}' failed`, unwrapError(error));
       }
-
-      if (order_by && order_by.length > 0) {
-        const orderByClause = order_by
-          .map(({ column, direction }) => `${quoteIdentifier(column)} ${direction}`)
-          .join(', ');
-        query += ` ORDER BY ${orderByClause}`;
-      }
-
-      query += ` LIMIT $${params.length + 1}`;
-      params.push(safeLimit);
-
-      const result = await pool.query(query, params);
-
-      return formatResult({
-        schema,
-        table,
-        query,
-        rows: result.rows,
-        row_count: result.rows.length,
-        limit: safeLimit,
-      });
     }
   );
 
@@ -206,12 +229,13 @@ export function registerQueryTools(
     'postgres_execute_query',
     {
       title: 'Execute Read-Only SQL Query',
-      description: `Ejecuta una consulta SQL SELECT completa de solo lectura. Soporta JOINs, subqueries, CTEs (WITH), funciones de agregación, UNION y operaciones multi-tabla. Solo se permiten SELECT/WITH. Timeout: 30 segundos. Máximo: 100 filas.`,
+      description: 'Runs an ad-hoc SELECT / WITH (CTE) query. Supports JOINs, subqueries, aggregations and UNION. Single statement only. Runs in a READ ONLY transaction with a 30s statement_timeout. Max 100 rows (auto-injected or clamped).',
       inputSchema: {
-        query: z.string().min(1).describe('Consulta SQL SELECT completa (ej: SELECT a.*, b.name FROM schema1.t1 a JOIN schema1.t2 b ON a.id = b.id)'),
+        query: z.string().min(1).describe('Full SELECT or WITH (CTE) SQL. One statement, no trailing INSERT/UPDATE/DELETE.'),
         limit: z.number().int().min(1).max(100).default(defaultLimit)
-          .describe(`Límite máximo de filas (default: ${defaultLimit}, max: 100)`),
+          .describe(`Maximum rows to return (default: ${defaultLimit}, max: 100).`),
       },
+      outputSchema: executeQueryOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ query, limit }) => {
@@ -220,18 +244,22 @@ export function registerQueryTools(
       const normalizedQuery = queryWithoutTrailingSemicolon.toLowerCase();
 
       if (queryWithoutTrailingSemicolon.includes(';')) {
-        throw new Error('No se permiten múltiples sentencias SQL en postgres_execute_query.');
+        return toolError('Multiple SQL statements are not allowed in postgres_execute_query.');
       }
 
       if (!normalizedQuery.startsWith('select') && !normalizedQuery.startsWith('with')) {
-        throw new Error('Solo se permiten consultas SELECT o WITH (CTE). No se permiten INSERT, UPDATE, DELETE, DROP, ALTER, CREATE u otras operaciones de modificación.');
+        return toolError(
+          'Only SELECT or WITH (CTE) queries are allowed. INSERT, UPDATE, DELETE, DROP, ALTER, CREATE and other write operations are forbidden.'
+        );
       }
 
       const forbiddenKeywords = ['insert', 'update', 'delete', 'drop', 'alter', 'create', 'truncate', 'grant', 'revoke', 'execute', 'copy'];
       for (const keyword of forbiddenKeywords) {
         const regex = new RegExp(`\\b${keyword}\\b\\s+(into|from|table|schema|database|index|function|procedure|trigger|role|user|privileges|on|all)\\b`, 'i');
         if (regex.test(query)) {
-          throw new Error(`Operación no permitida: la query contiene '${keyword}' seguido de un contexto de modificación. Solo se permiten consultas de lectura (SELECT/WITH).`);
+          return toolError(
+            `Operation not allowed: query contains '${keyword}' followed by a write-context keyword. Only read queries (SELECT/WITH) are accepted.`
+          );
         }
       }
 
@@ -275,10 +303,10 @@ export function registerQueryTools(
           try {
             await client.query('ROLLBACK');
           } catch {
-            // Ignorado: si falla rollback, se prioriza propagar el error original.
+            // Rollback failure is intentionally swallowed so the original error propagates.
           }
         }
-        throw error;
+        return toolError('Query execution failed', { ...unwrapError(error), query: finalQuery });
       } finally {
         client.release();
       }

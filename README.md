@@ -1,20 +1,51 @@
 # MCP PostgreSQL
 
-Servidor MCP (Model Context Protocol) que expone herramientas de introspección y consulta de solo lectura sobre bases de datos PostgreSQL.
+Servidor MCP (Model Context Protocol) que expone introspección y consulta de solo lectura sobre bases de datos PostgreSQL. Diseñado para alimentar de contexto a Claude (Claude Code, Claude Desktop) sin riesgo de escritura.
 
-## Herramientas disponibles
+## Herramientas (13)
 
-| Herramienta | Descripción |
-|-------------|-------------|
-| `postgres_list_schemas` | Lista todos los esquemas accesibles |
-| `postgres_list_tables` | Lista tablas de un esquema con conteo de columnas |
-| `postgres_describe_table` | Estructura completa: columnas, constraints e índices |
-| `postgres_list_functions` | Funciones/procedimientos con firma y tipo de retorno |
-| `postgres_list_triggers` | Triggers con tabla, evento y timing |
-| `postgres_query_table` | SELECT seguro en una tabla con filtros estructurados y LIMIT |
-| `postgres_execute_query` | Consultas avanzadas de solo lectura: JOINs, CTEs, subqueries, agregaciones |
-| `postgres_get_function_definition` | Código fuente de una función almacenada (con soporte de sobrecarga) |
-| `postgres_get_trigger_definition` | Definición completa de un trigger |
+### Introspección
+
+| Tool | Descripción |
+|------|-------------|
+| `postgres_list_schemas` | Lista esquemas accesibles. |
+| `postgres_list_tables` | Tablas de un esquema con conteo de columnas (paginado). |
+| `postgres_describe_table` | Columnas, constraints (PK/FK/UNIQUE) e índices. |
+| `postgres_list_functions` | Funciones/procedimientos con firma, retorno y lenguaje (paginado). |
+| `postgres_list_triggers` | Triggers con tabla, evento y timing (paginado). |
+| `postgres_get_function_definition` | Código fuente de una función (con soporte de sobrecarga). |
+| `postgres_get_trigger_definition` | Definición completa de un trigger. |
+| `postgres_list_views` | Vistas regulares y materializadas (paginado). |
+| `postgres_search_columns` | Busca columnas por nombre/patrón en todos los esquemas permitidos. |
+
+### Consulta
+
+| Tool | Descripción |
+|------|-------------|
+| `postgres_query_table` | SELECT seguro sobre una sola tabla con filtros estructurados. |
+| `postgres_execute_query` | SELECT/WITH avanzado (JOINs, CTEs, agregaciones). Single-statement, READ ONLY. |
+| `postgres_explain_query` | EXPLAIN / EXPLAIN ANALYZE de un SELECT — perfila planes antes de ejecutar. |
+| `postgres_get_table_stats` | Tamaño total/tabla/índices/toast, vacuum/analyze, índices con `idx_scan = 0`. |
+
+Todas las tools llevan `readOnlyHint: true`, `destructiveHint: false` y `outputSchema` zod para `structuredContent`. Los errores recuperables se devuelven como `{ isError: true, content }`, no como excepciones de protocolo.
+
+## Resources
+
+URIs navegables que el host puede consumir como contexto:
+
+| URI template | Contenido |
+|--------------|-----------|
+| `postgres://schema/{schema}` | Resumen de un esquema: tablas, vistas, funciones, triggers, conteos. |
+| `postgres://table/{schema}/{table}` | Estructura completa de una tabla (cols + constraints + índices). |
+
+## Prompts (slash commands)
+
+| Prompt | Argumentos | Propósito |
+|--------|------------|-----------|
+| `audit-table` | `schema`, `table` | Auditoría estructurada: schema, storage, sample, triggers, riesgos. |
+| `find-tables` | `pattern` | Encuentra columnas/tablas por patrón fuzzy. |
+| `explain-foreign-keys` | `schema` | Mapa textual de FKs (hubs, huérfanos). |
+| `profile-slow-query` | `sql` | EXPLAIN ANALYZE + recomendaciones priorizadas. |
 
 ## Instalación
 
@@ -25,7 +56,7 @@ pnpm run build
 
 ## Configuración
 
-Copia `.env.example` a `.env` y completa los valores:
+Copia `.env.example` a `.env`:
 
 ```env
 DB_HOST=localhost
@@ -34,23 +65,52 @@ DB_NAME=nombre_base_datos
 DB_USER=usuario
 DB_PASSWORD=contraseña
 DB_SSL=false              # true para bases de datos en la nube (AWS RDS)
-DB_SSL_REJECT_UNAUTHORIZED=true  # recomendado en producción
+DB_SSL_REJECT_UNAUTHORIZED=true
 DB_SCHEMAS=public         # Esquemas permitidos, separados por coma. Vacío = todos
-DEFAULT_LIMIT=5           # Límite por defecto de filas (máximo absoluto: 100)
+DEFAULT_LIMIT=5
 ```
 
 ### Entornos preconfigurados
-
-El repositorio incluye archivos `.env.*` para distintos entornos. Para cambiar de entorno copia el archivo correspondiente a `.env`:
 
 ```bash
 cp .env.ecosistema-prd .env
 cp .env.db-admision-tst .env
 ```
 
-## Integración MCP
+## Integración con Claude Code
 
-Agrega el servidor al archivo de configuración MCP de tu cliente:
+### Opción A — `claude mcp add` (recomendado)
+
+```bash
+claude mcp add \
+  --transport stdio \
+  --env DB_HOST=localhost \
+  --env DB_PORT=5432 \
+  --env DB_NAME=mi_base \
+  --env DB_USER=mi_user \
+  --env DB_PASSWORD=mi_password \
+  --env DB_SCHEMAS=public \
+  postgres \
+  -- node /ruta/absoluta/al/proyecto/dist/index.js
+```
+
+Variantes útiles:
+
+- Para que tome el `.env` del repo y no pases credenciales al CLI, omite los `--env` y asegúrate de que `dist/index.js` arranque desde el directorio del proyecto:
+
+  ```bash
+  claude mcp add --transport stdio postgres \
+    -- node /ruta/absoluta/al/proyecto/dist/index.js
+  ```
+
+- Para scope global (todos los proyectos):
+
+  ```bash
+  claude mcp add --scope user --transport stdio postgres \
+    -- node /ruta/absoluta/al/proyecto/dist/index.js
+  ```
+
+### Opción B — JSON manual
 
 ```json
 {
@@ -70,21 +130,26 @@ Agrega el servidor al archivo de configuración MCP de tu cliente:
 }
 ```
 
-Alternativamente, si usas `.env`, basta con apuntar al `dist/index.js` sin pasar `env` en la configuración.
-
 ## Verificar conectividad
 
 ```bash
 npx tsx test-connection.ts
 ```
 
-Muestra la configuración activa, prueba la conexión, lista esquemas y las primeras 5 tablas del primer esquema configurado.
-
 ## Seguridad
 
-- **Filtrado de esquemas:** `DB_SCHEMAS` restringe el acceso a nivel de aplicación y vía `search_path` local por consulta.
-- **Query table segura:** `postgres_query_table` usa columnas/filtros estructurados y parámetros SQL para evitar inyección.
-- **Solo lectura reforzada:** `postgres_execute_query` corre en `READ ONLY transaction`, limita a una sola sentencia y mantiene validaciones de texto.
-- **Límite de filas:** máximo 100 filas por consulta; se inyecta o reduce el `LIMIT` automáticamente.
-- **TLS seguro por defecto:** cuando `DB_SSL=true`, `DB_SSL_REJECT_UNAUTHORIZED=true` por defecto.
-- **Timeouts:** 10 s para establecer conexión, 30 s de `statement_timeout` por consulta.
+- **Filtrado de esquemas**: `DB_SCHEMAS` restringe acceso a nivel de aplicación; además `postgres_execute_query` ajusta `search_path` local por consulta.
+- **Query table segura**: `postgres_query_table` usa columnas/filtros estructurados y parámetros SQL — no concatena strings.
+- **Solo lectura reforzada**: `postgres_execute_query` y `postgres_explain_query` corren bajo `SET TRANSACTION READ ONLY` con `statement_timeout = 30s`.
+- **Single-statement**: rechaza queries con `;` interno y palabras clave de escritura.
+- **Límite de filas**: máximo 100 filas por consulta; se inyecta o clampa el `LIMIT` automáticamente.
+- **TLS seguro por defecto**: cuando `DB_SSL=true`, `DB_SSL_REJECT_UNAUTHORIZED=true` por defecto.
+- **Timeouts**: 10 s para establecer conexión.
+
+## Desarrollo
+
+```bash
+pnpm run build      # Compila TypeScript → dist/
+pnpm run dev        # Watch mode
+pnpm start          # Ejecuta el servidor compilado
+```

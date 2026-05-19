@@ -1,0 +1,122 @@
+{
+  "manifest_version": "0.2",
+  "name": "mcp-postgres",
+  "display_name": "PostgreSQL Read-Only MCP",
+  "version": "1.1.0",
+  "description": "Read-only PostgreSQL introspection and query server for Claude. Exposes schemas, tables, views, functions, triggers; runs safe SELECT/WITH queries; profiles plans with EXPLAIN ANALYZE; surfaces table stats.",
+  "long_description": "Read-only PostgreSQL MCP server with 13 tools (introspection + querying + EXPLAIN + table stats), 2 resource templates (schema and table URIs) and 4 prompts (audit-table, find-tables, explain-foreign-keys, profile-slow-query). All queries run in READ ONLY transactions with a 30s statement_timeout and a 100-row cap. Multi-statement input is rejected.",
+  "author": {
+    "name": "cuevacelis"
+  },
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "DB_HOST": "${user_config.db_host}",
+        "DB_PORT": "${user_config.db_port}",
+        "DB_NAME": "${user_config.db_name}",
+        "DB_USER": "${user_config.db_user}",
+        "DB_PASSWORD": "${user_config.db_password}",
+        "DB_SSL": "${user_config.db_ssl}",
+        "DB_SSL_REJECT_UNAUTHORIZED": "${user_config.db_ssl_reject_unauthorized}",
+        "DB_SCHEMAS": "${user_config.db_schemas}",
+        "DEFAULT_LIMIT": "${user_config.default_limit}"
+      }
+    }
+  },
+  "user_config": {
+    "db_host": {
+      "type": "string",
+      "title": "Host",
+      "description": "PostgreSQL host (e.g. localhost or db.example.com).",
+      "default": "localhost",
+      "required": true
+    },
+    "db_port": {
+      "type": "string",
+      "title": "Port",
+      "description": "PostgreSQL TCP port.",
+      "default": "5432",
+      "required": true
+    },
+    "db_name": {
+      "type": "string",
+      "title": "Database",
+      "description": "Database name to connect to.",
+      "required": true
+    },
+    "db_user": {
+      "type": "string",
+      "title": "User",
+      "description": "Database user. A read-only role is recommended.",
+      "required": true
+    },
+    "db_password": {
+      "type": "string",
+      "title": "Password",
+      "description": "Database password.",
+      "sensitive": true,
+      "required": true
+    },
+    "db_ssl": {
+      "type": "string",
+      "title": "Enable SSL",
+      "description": "Set to 'true' for cloud databases (AWS RDS, Supabase, Neon...).",
+      "default": "false",
+      "required": false
+    },
+    "db_ssl_reject_unauthorized": {
+      "type": "string",
+      "title": "Reject unauthorized SSL certs",
+      "description": "Keep 'true' in production. Set 'false' only for self-signed certs.",
+      "default": "true",
+      "required": false
+    },
+    "db_schemas": {
+      "type": "string",
+      "title": "Allowed schemas",
+      "description": "Comma-separated list of schemas to expose. Empty = all non-system schemas.",
+      "default": "public",
+      "required": false
+    },
+    "default_limit": {
+      "type": "string",
+      "title": "Default row limit",
+      "description": "Default LIMIT applied to queries (max 100).",
+      "default": "5",
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "postgres_list_schemas", "description": "List accessible schemas." },
+    { "name": "postgres_list_tables", "description": "List tables of a schema (paginated)." },
+    { "name": "postgres_describe_table", "description": "Columns, constraints and indexes of a table." },
+    { "name": "postgres_list_functions", "description": "List functions/procedures (paginated)." },
+    { "name": "postgres_list_triggers", "description": "List user-defined triggers (paginated)." },
+    { "name": "postgres_get_function_definition", "description": "Source code of a function (overload-aware)." },
+    { "name": "postgres_get_trigger_definition", "description": "Full CREATE TRIGGER statement." },
+    { "name": "postgres_list_views", "description": "List views and materialized views." },
+    { "name": "postgres_search_columns", "description": "Search columns by name across allowed schemas." },
+    { "name": "postgres_query_table", "description": "Safe single-table SELECT with structured filters." },
+    { "name": "postgres_execute_query", "description": "Read-only SELECT/WITH ad-hoc query (single statement)." },
+    { "name": "postgres_explain_query", "description": "EXPLAIN or EXPLAIN ANALYZE for a SELECT/WITH." },
+    { "name": "postgres_get_table_stats", "description": "Storage footprint and activity stats for a table." }
+  ],
+  "prompts": [
+    { "name": "audit-table" },
+    { "name": "find-tables" },
+    { "name": "explain-foreign-keys" },
+    { "name": "profile-slow-query" }
+  ],
+  "keywords": ["mcp", "postgres", "postgresql", "database", "introspection", "read-only"],
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
