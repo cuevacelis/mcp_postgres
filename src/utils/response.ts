@@ -8,19 +8,14 @@ export function formatResult<T>(data: T): McpToolResult {
   const text = JSON.stringify(data, null, 2);
   const isStructurable = typeof data === 'object' && data !== null && !Array.isArray(data);
 
-  if (text.length <= CHARACTER_LIMIT) {
-    return {
-      content: [{ type: 'text', text }],
-      ...(isStructurable ? { structuredContent: data as Record<string, unknown> } : {}),
-    };
-  }
+  const textContent = text.length <= CHARACTER_LIMIT
+    ? text
+    : text.slice(0, CHARACTER_LIMIT)
+      + `\n\n...[RESPONSE TRUNCATED: ${text.length} total chars. Use column filters, a WHERE clause, or pagination to reduce the result size.]`;
 
-  const truncated = text.slice(0, CHARACTER_LIMIT);
   return {
-    content: [{
-      type: 'text',
-      text: truncated + `\n\n...[RESPONSE TRUNCATED: ${text.length} total chars. Use column filters, a WHERE clause, or pagination to reduce the result size.]`,
-    }],
+    content: [{ type: 'text', text: textContent }],
+    ...(isStructurable ? { structuredContent: data as Record<string, unknown> } : {}),
   };
 }
 
