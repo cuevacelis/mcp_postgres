@@ -2,8 +2,9 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Pool } from 'pg';
 import {
-  assertSchemaAllowed,
+  buildSchemaDescription,
   formatResult,
+  resolveSchema,
   toolError,
   unwrapError,
 } from '../utils/response.js';
@@ -91,22 +92,23 @@ export function registerObjectTools(
       title: 'List PostgreSQL Functions',
       description: 'Lists every function, procedure, aggregate, and window function in a schema, with arguments, return type, language and pg_proc comments. Paginated.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         ...paginationFields,
       },
       outputSchema: listFunctionsOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, limit, offset }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const countResult = await pool.query<{ total: string }>(
           `SELECT COUNT(*) as total
            FROM pg_catalog.pg_proc p
            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname = $1`,
-          [schema]
+          [resolvedSchema]
         );
         const total = Number.parseInt(countResult.rows[0].total, 10);
 
@@ -131,12 +133,12 @@ export function registerObjectTools(
           ORDER BY p.proname
           LIMIT $2 OFFSET $3
           `,
-          [schema, limit, offset]
+          [resolvedSchema, limit, offset]
         );
 
         const count = result.rows.length;
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           functions: result.rows,
           count,
           total,
@@ -145,7 +147,7 @@ export function registerObjectTools(
           ...(total > offset + count ? { next_offset: offset + count } : {}),
         });
       } catch (error) {
-        return toolError(`Failed to list functions in '${schema}'`, unwrapError(error));
+        return toolError(`Failed to list functions${resolvedSchema ? ` in '${resolvedSchema}'` : ''}`, unwrapError(error));
       }
     }
   );
@@ -156,7 +158,7 @@ export function registerObjectTools(
       title: 'Get Function Source Code',
       description: 'Returns the full source code (pg_get_functiondef) for a stored procedure or function. When the name is overloaded, pass function_signature to disambiguate (e.g. "integer, text").',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         function_name: sqlIdentifier.describe('Function or procedure name.'),
         function_signature: z
           .string()
@@ -167,8 +169,9 @@ export function registerObjectTools(
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, function_name, function_signature }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const result = await pool.query(
           `
@@ -184,11 +187,11 @@ export function registerObjectTools(
           WHERE n.nspname = $1 AND p.proname = $2
           ORDER BY pg_catalog.pg_get_function_identity_arguments(p.oid)
           `,
-          [schema, function_name]
+          [resolvedSchema, function_name]
         );
 
         if (result.rows.length === 0) {
-          return toolError(`Function '${function_name}' not found in schema '${schema}'`);
+          return toolError(`Function '${function_name}' not found in schema '${resolvedSchema}'`);
         }
 
         let selected = result.rows[0];
@@ -202,7 +205,7 @@ export function registerObjectTools(
               (row) => row.function_signature as string
             );
             return toolError(
-              `Overload '${function_name}(${normalizedSignature})' does not exist in schema '${schema}'.`,
+              `Overload '${function_name}(${normalizedSignature})' does not exist in schema '${resolvedSchema}'.`,
               { available_signatures: availableSignatures }
             );
           }
@@ -212,7 +215,7 @@ export function registerObjectTools(
             (row) => row.function_signature as string
           );
           return toolError(
-            `Function '${function_name}' is overloaded in schema '${schema}'. Specify function_signature.`,
+            `Function '${function_name}' is overloaded in schema '${resolvedSchema}'. Specify function_signature.`,
             { available_signatures: availableSignatures }
           );
         }
@@ -225,7 +228,7 @@ export function registerObjectTools(
           description: selected.description,
         });
       } catch (error) {
-        return toolError(`Failed to fetch definition of '${schema}.${function_name}'`, unwrapError(error));
+        return toolError(`Failed to fetch definition of '${resolvedSchema ?? '?'}.${function_name}'`, unwrapError(error));
       }
     }
   );
@@ -236,15 +239,16 @@ export function registerObjectTools(
       title: 'List PostgreSQL Triggers',
       description: 'Lists user-defined triggers in a schema with table, event (INSERT/UPDATE/DELETE), timing (BEFORE/AFTER) and action statement. Paginated. Internal/system triggers are excluded.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         ...paginationFields,
       },
       outputSchema: listTriggersOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, limit, offset }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const countResult = await pool.query<{ total: string }>(
           `SELECT COUNT(*) as total
@@ -252,7 +256,7 @@ export function registerObjectTools(
            JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
            WHERE n.nspname = $1 AND NOT tg.tgisinternal`,
-          [schema]
+          [resolvedSchema]
         );
         const total = Number.parseInt(countResult.rows[0].total, 10);
 
@@ -280,12 +284,12 @@ export function registerObjectTools(
           ORDER BY c.relname, tg.tgname
           LIMIT $2 OFFSET $3
           `,
-          [schema, limit, offset]
+          [resolvedSchema, limit, offset]
         );
 
         const count = result.rows.length;
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           triggers: result.rows,
           count,
           total,
@@ -294,7 +298,7 @@ export function registerObjectTools(
           ...(total > offset + count ? { next_offset: offset + count } : {}),
         });
       } catch (error) {
-        return toolError(`Failed to list triggers in '${schema}'`, unwrapError(error));
+        return toolError(`Failed to list triggers${resolvedSchema ? ` in '${resolvedSchema}'` : ''}`, unwrapError(error));
       }
     }
   );
@@ -305,7 +309,7 @@ export function registerObjectTools(
       title: 'Get Trigger Definition',
       description: 'Returns the full CREATE TRIGGER statement (pg_get_triggerdef) plus its event/timing/action. If the same trigger name exists on several tables, pass table_name to disambiguate.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         trigger_name: sqlIdentifier.describe('Trigger name.'),
         table_name: sqlIdentifier
           .optional()
@@ -315,10 +319,11 @@ export function registerObjectTools(
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, trigger_name, table_name }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
-        const params: string[] = [schema, trigger_name];
+        const params: string[] = [resolvedSchema, trigger_name];
         let tableFilter = '';
         if (table_name) {
           params.push(table_name);
@@ -356,14 +361,14 @@ export function registerObjectTools(
 
         if (result.rows.length === 0) {
           return toolError(
-            `Trigger '${trigger_name}' not found in schema '${schema}'${table_name ? ` for table '${table_name}'` : ''}`
+            `Trigger '${trigger_name}' not found in schema '${resolvedSchema}'${table_name ? ` for table '${table_name}'` : ''}`
           );
         }
 
         if (!table_name && result.rows.length > 1) {
           const candidateTables = result.rows.map((row) => row.table_name as string);
           return toolError(
-            `Trigger '${trigger_name}' exists on multiple tables of schema '${schema}'. Specify table_name.`,
+            `Trigger '${trigger_name}' exists on multiple tables of schema '${resolvedSchema}'. Specify table_name.`,
             { candidate_tables: candidateTables }
           );
         }

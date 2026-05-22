@@ -29,7 +29,6 @@ export function toolError(message: string, details?: Record<string, unknown>): M
   return {
     isError: true,
     content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
-    structuredContent: payload,
   };
 }
 
@@ -50,11 +49,51 @@ export class SchemaNotAllowedError extends Error {
   }
 }
 
+export class SchemaRequiredError extends Error {
+  readonly allowedSchemas: readonly string[];
+  constructor(allowedSchemas: readonly string[]) {
+    const hint = allowedSchemas.length === 0
+      ? 'No DB_SCHEMAS configured. Call postgres_list_schemas to discover available schemas, then pass `schema` explicitly.'
+      : `Pass one of: ${allowedSchemas.join(', ')}.`;
+    super(`Argument 'schema' is required. ${hint}`);
+    this.name = 'SchemaRequiredError';
+    this.allowedSchemas = allowedSchemas;
+  }
+}
+
+export function resolveSchema(provided: string | undefined, allowedSchemas: string[]): string {
+  if (provided !== undefined && provided !== '') {
+    assertSchemaAllowed(provided, allowedSchemas);
+    return provided;
+  }
+  if (allowedSchemas.length === 1) {
+    return allowedSchemas[0];
+  }
+  throw new SchemaRequiredError(allowedSchemas);
+}
+
+export function buildSchemaDescription(allowedSchemas: string[]): string {
+  if (allowedSchemas.length === 0) {
+    return 'Schema name. Required — no DB_SCHEMAS is configured, so call postgres_list_schemas first if unknown.';
+  }
+  if (allowedSchemas.length === 1) {
+    return `Schema name. Optional — defaults to '${allowedSchemas[0]}' (the only schema configured in DB_SCHEMAS).`;
+  }
+  return `Schema name. Must be one of the configured schemas: ${allowedSchemas.map((s) => `'${s}'`).join(', ')}.`;
+}
+
 export function unwrapError(error: unknown): { message: string; code?: string; detail?: string } {
   if (error instanceof SchemaNotAllowedError) {
     return {
       message: error.message,
       code: 'SCHEMA_NOT_ALLOWED',
+      detail: `Allowed schemas: ${error.allowedSchemas.length > 0 ? error.allowedSchemas.join(', ') : '(all)'}`,
+    };
+  }
+  if (error instanceof SchemaRequiredError) {
+    return {
+      message: error.message,
+      code: 'SCHEMA_REQUIRED',
       detail: `Allowed schemas: ${error.allowedSchemas.length > 0 ? error.allowedSchemas.join(', ') : '(all)'}`,
     };
   }

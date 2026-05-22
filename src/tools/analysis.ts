@@ -3,7 +3,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Pool } from 'pg';
 import {
   assertSchemaAllowed,
+  buildSchemaDescription,
   formatResult,
+  resolveSchema,
   toolError,
   unwrapError,
 } from '../utils/response.js';
@@ -166,7 +168,7 @@ export function registerAnalysisTools(
       title: 'List Views and Materialized Views',
       description: 'Lists regular views and materialized views in a schema, with their comments and updatability flag (for regular views). Paginated.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         include_materialized: z.boolean().default(true).describe('Include materialized views in the result.'),
         limit: z.number().int().min(1).max(500).default(50),
         offset: z.number().int().min(0).default(0),
@@ -175,8 +177,9 @@ export function registerAnalysisTools(
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, include_materialized, limit, offset }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const typeFilter = include_materialized
           ? `c.relkind IN ('v', 'm')`
@@ -187,7 +190,7 @@ export function registerAnalysisTools(
            FROM pg_catalog.pg_class c
            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
            WHERE n.nspname = $1 AND ${typeFilter}`,
-          [schema]
+          [resolvedSchema]
         );
         const total = Number.parseInt(countResult.rows[0].total, 10);
 
@@ -206,12 +209,12 @@ export function registerAnalysisTools(
           ORDER BY c.relname
           LIMIT $2 OFFSET $3
           `,
-          [schema, limit, offset]
+          [resolvedSchema, limit, offset]
         );
 
         const count = result.rows.length;
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           views: result.rows,
           count,
           total,
@@ -220,7 +223,7 @@ export function registerAnalysisTools(
           ...(total > offset + count ? { next_offset: offset + count } : {}),
         });
       } catch (error) {
-        return toolError(`Failed to list views in '${schema}'`, unwrapError(error));
+        return toolError(`Failed to list views${resolvedSchema ? ` in '${resolvedSchema}'` : ''}`, unwrapError(error));
       }
     }
   );
@@ -315,15 +318,16 @@ export function registerAnalysisTools(
       title: 'Get Table Storage and Activity Stats',
       description: 'Returns storage footprint (total/table/indexes/toast), estimated and live/dead row counts, vacuum/analyze timestamps, and per-index size and scan counts for a table. Useful for spotting bloat, unused indexes, or stale statistics.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         table: sqlIdentifier.describe('Table name.'),
       },
       outputSchema: tableStatsOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, table }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const sizesResult = await pool.query(
           `
@@ -339,11 +343,11 @@ export function registerAnalysisTools(
           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
           WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p', 'm')
           `,
-          [schema, table]
+          [resolvedSchema, table]
         );
 
         if (sizesResult.rows.length === 0) {
-          return toolError(`Table '${schema}.${table}' not found.`);
+          return toolError(`Table '${resolvedSchema}.${table}' not found.`);
         }
         const sizeRow = sizesResult.rows[0];
 
@@ -359,7 +363,7 @@ export function registerAnalysisTools(
           FROM pg_catalog.pg_stat_user_tables
           WHERE schemaname = $1 AND relname = $2
           `,
-          [schema, table]
+          [resolvedSchema, table]
         );
         const stats = statsResult.rows[0] ?? {};
 
@@ -380,7 +384,7 @@ export function registerAnalysisTools(
         );
 
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           table,
           estimated_row_count: Number(sizeRow.estimated_row_count),
           total_size_bytes: Number(sizeRow.total_size_bytes),
@@ -403,7 +407,7 @@ export function registerAnalysisTools(
           })),
         });
       } catch (error) {
-        return toolError(`Failed to fetch stats for '${schema}.${table}'`, unwrapError(error));
+        return toolError(`Failed to fetch stats for '${resolvedSchema ?? '?'}.${table}'`, unwrapError(error));
       }
     }
   );

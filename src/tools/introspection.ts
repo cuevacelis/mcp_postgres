@@ -2,8 +2,9 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Pool } from 'pg';
 import {
-  assertSchemaAllowed,
+  buildSchemaDescription,
   formatResult,
+  resolveSchema,
   toolError,
   unwrapError,
 } from '../utils/response.js';
@@ -125,20 +126,21 @@ export function registerIntrospectionTools(
       title: 'List Tables in Schema',
       description: 'Lists base tables in a schema, with column counts and table-level comments. Supports limit/offset pagination; returns has_more and next_offset when more rows exist.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name (e.g., public).'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         ...paginationFields,
       },
       outputSchema: listTablesOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, limit, offset }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const countResult = await pool.query<{ total: string }>(
           `SELECT COUNT(*) as total FROM information_schema.tables
            WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
-          [schema]
+          [resolvedSchema]
         );
         const total = Number.parseInt(countResult.rows[0].total, 10);
 
@@ -158,12 +160,12 @@ export function registerIntrospectionTools(
           ORDER BY t.table_name
           LIMIT $2 OFFSET $3
           `,
-          [schema, limit, offset]
+          [resolvedSchema, limit, offset]
         );
 
         const count = result.rows.length;
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           tables: result.rows,
           count,
           total,
@@ -172,7 +174,7 @@ export function registerIntrospectionTools(
           ...(total > offset + count ? { next_offset: offset + count } : {}),
         });
       } catch (error) {
-        return toolError(`Failed to list tables in '${schema}'`, unwrapError(error));
+        return toolError(`Failed to list tables${resolvedSchema ? ` in '${resolvedSchema}'` : ''}`, unwrapError(error));
       }
     }
   );
@@ -183,15 +185,16 @@ export function registerIntrospectionTools(
       title: 'Describe Table Structure',
       description: 'Returns full column metadata (types, defaults, nullability, comments), constraints (PK/FK/UNIQUE/CHECK), and indexes for a table. Three pg_catalog queries run in parallel.',
       inputSchema: {
-        schema: sqlIdentifier.describe('Schema name.'),
+        schema: sqlIdentifier.optional().describe(buildSchemaDescription(allowedSchemas)),
         table: sqlIdentifier.describe('Table name.'),
       },
       outputSchema: describeTableOutput,
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, table }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const [columnsResult, constraintsResult, indexesResult] = await Promise.all([
           pool.query(
@@ -211,7 +214,7 @@ export function registerIntrospectionTools(
             WHERE c.table_schema = $1 AND c.table_name = $2
             ORDER BY c.ordinal_position
             `,
-            [schema, table]
+            [resolvedSchema, table]
           ),
           pool.query(
             `
@@ -232,7 +235,7 @@ export function registerIntrospectionTools(
             WHERE tc.table_schema = $1 AND tc.table_name = $2
             ORDER BY tc.constraint_type, tc.constraint_name
             `,
-            [schema, table]
+            [resolvedSchema, table]
           ),
           pool.query(
             `
@@ -249,23 +252,23 @@ export function registerIntrospectionTools(
             WHERE n.nspname = $1 AND t.relname = $2
             ORDER BY i.relname, a.attnum
             `,
-            [schema, table]
+            [resolvedSchema, table]
           ),
         ]);
 
         if (columnsResult.rows.length === 0) {
-          return toolError(`Table '${schema}.${table}' not found or has no columns visible to this role.`);
+          return toolError(`Table '${resolvedSchema}.${table}' not found or has no columns visible to this role.`);
         }
 
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           table,
           columns: columnsResult.rows,
           constraints: constraintsResult.rows,
           indexes: indexesResult.rows,
         });
       } catch (error) {
-        return toolError(`Failed to describe '${schema}.${table}'`, unwrapError(error));
+        return toolError(`Failed to describe '${resolvedSchema ?? '?'}.${table}'`, unwrapError(error));
       }
     }
   );

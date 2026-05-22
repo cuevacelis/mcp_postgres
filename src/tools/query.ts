@@ -2,8 +2,9 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Pool } from 'pg';
 import {
-  assertSchemaAllowed,
+  buildSchemaDescription,
   formatResult,
+  resolveSchema,
   toolError,
   unwrapError,
 } from '../utils/response.js';
@@ -161,7 +162,7 @@ export function registerQueryTools(
       title: 'Query Single Table',
       description: 'Runs a safe SELECT on a single table using structured filters (parameterized) and an automatic LIMIT. Use this as the default read tool. For JOINs, subqueries, CTEs, or aggregations escalate to postgres_execute_query. Max 100 rows.',
       inputSchema: {
-        schema: sqlIdentifierSchema.describe('Schema name.'),
+        schema: sqlIdentifierSchema.optional().describe(buildSchemaDescription(allowedSchemas)),
         table: sqlIdentifierSchema.describe('Table name.'),
         columns: z
           .array(sqlIdentifierSchema)
@@ -184,14 +185,15 @@ export function registerQueryTools(
       annotations: TOOL_ANNOTATIONS,
     },
     async ({ schema, table, columns, filters, order_by, limit }) => {
+      let resolvedSchema: string | undefined;
       try {
-        assertSchemaAllowed(schema, allowedSchemas);
+        resolvedSchema = resolveSchema(schema, allowedSchemas);
 
         const safeLimit = Math.min(Math.max(1, limit), 100);
         const selectedColumns = columns.length > 0
           ? columns.map((column) => quoteIdentifier(column)).join(', ')
           : '*';
-        let query = `SELECT ${selectedColumns} FROM ${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+        let query = `SELECT ${selectedColumns} FROM ${quoteIdentifier(resolvedSchema)}.${quoteIdentifier(table)}`;
 
         const params: QueryParam[] = [];
         if (filters.length > 0) {
@@ -212,7 +214,7 @@ export function registerQueryTools(
         const result = await pool.query(query, params);
 
         return formatResult({
-          schema,
+          schema: resolvedSchema,
           table,
           query,
           rows: result.rows,
@@ -220,7 +222,7 @@ export function registerQueryTools(
           limit: safeLimit,
         });
       } catch (error) {
-        return toolError(`Query on '${schema}.${table}' failed`, unwrapError(error));
+        return toolError(`Query on '${resolvedSchema ?? '?'}.${table}' failed`, unwrapError(error));
       }
     }
   );
